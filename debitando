@@ -1,0 +1,378 @@
+# =========================
+# 1. IMPORTAÇÕES
+# =========================
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+from datetime import datetime
+from fpdf import FPDF
+import smtplib
+from email.message import EmailMessage
+
+
+# =========================
+# 2. CONFIGURAÇÃO DA PÁGINA
+# =========================
+st.set_page_config(
+    page_title="DEBITANDO - MENOS PLANILHA, MAIS RESULTADO",
+    page_icon="LG1.png",
+    layout="wide"
+)
+
+
+# =========================
+# 3. ESTILO
+# =========================
+st.markdown("""
+<style>
+div.stButton > button {
+    background-color: #b30000;
+    color: white;
+    border-radius: 12px;
+    box-shadow: 0 0 12px #ff4d4d;
+    font-weight: bold;
+    padding: 0.6em 1.2em;
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# =========================
+# 4. PASTAS
+# =========================
+BASE_DIR = "data/usuarios"
+RELATORIOS_DIR = "relatorios"
+
+os.makedirs(BASE_DIR, exist_ok=True)
+os.makedirs(RELATORIOS_DIR, exist_ok=True)
+
+
+# =========================
+# 5. FUNÇÕES DE DADOS
+# =========================
+def caminho_usuario(usuario):
+    return f"{BASE_DIR}/{usuario}.csv"
+
+
+def salvar_historico(usuario, dados):
+    arquivo = caminho_usuario(usuario)
+    df = pd.DataFrame([dados])
+
+    if os.path.exists(arquivo):
+        df.to_csv(arquivo, mode="a", header=False, index=False)
+    else:
+        df.to_csv(arquivo, index=False)
+
+
+def carregar_historico(usuario):
+    arquivo = caminho_usuario(usuario)
+    if os.path.exists(arquivo):
+        return pd.read_csv(arquivo)
+    return pd.DataFrame()
+
+
+# =========================
+# 5.1 HISTÓRICO INTELIGENTE
+# =========================
+def salvar_evento(usuario, tipo, descricao, valor, saldo):
+    dados = {
+        "Data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "Tipo": tipo,
+        "Descrição": descricao,
+        "Valor": valor,
+        "Saldo": saldo
+    }
+    salvar_historico(usuario, dados)
+
+
+def carregar_eventos(usuario):
+    historico = carregar_historico(usuario)
+    if historico.empty:
+        return pd.DataFrame(columns=["Data", "Tipo", "Descrição", "Valor", "Saldo"])
+    return historico
+
+
+# =========================
+# 6. GRÁFICOS
+# =========================
+def gerar_grafico_despesas(despesas, usuario):
+    df = despesas.copy()
+    df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0)
+
+    if df["Valor"].sum() == 0:
+        return None
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    cores = ["#b30000", "#ff4d4d", "#ff9999", "#ffd6d6", "#ffcccc", "#ffe6e6"]
+
+    ax.pie(
+        df["Valor"],
+        labels=df["Categoria"],
+        autopct="%1.1f%%",
+        startangle=90,
+        colors=cores
+    )
+
+    ax.set_title("Distribuição de Despesas", color="#b30000")
+    ax.axis("equal")
+
+    caminho = f"{RELATORIOS_DIR}/{usuario}_despesas.png"
+    plt.savefig(caminho, bbox_inches="tight")
+    plt.close()
+
+    return caminho, fig
+
+
+def gerar_grafico_saldo(historico, usuario):
+    if historico.empty or "Saldo" not in historico.columns:
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    ax.plot(
+        historico["Saldo"],
+        marker="o",
+        linewidth=3,
+        color="#b30000"
+    )
+
+    ax.axhline(0, color="black", linestyle="--", alpha=0.4)
+    ax.set_title("Evolução do Saldo", color="#b30000")
+    ax.set_xlabel("Períodos")
+    ax.set_ylabel("R$")
+    ax.grid(alpha=0.3)
+
+    caminho = f"{RELATORIOS_DIR}/{usuario}_saldo.png"
+    plt.savefig(caminho, bbox_inches="tight")
+    plt.close()
+
+    return caminho, fig
+
+
+# =========================
+# 7. PDF
+# =========================
+def gerar_pdf(usuario, renda, despesas, saldo, grafico1, grafico2):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "Relatório Financeiro - DEBITANDO", ln=True)
+
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(0, 8, f"Usuário: {usuario}", ln=True)
+    pdf.cell(0, 8, f"Data: {datetime.now().strftime('%d/%m/%Y')}", ln=True)
+
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Resumo Financeiro", ln=True)
+
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(0, 8, f"Renda Total: R$ {renda:,.2f}", ln=True)
+    pdf.cell(0, 8, f"Despesas Totais: R$ {despesas:,.2f}", ln=True)
+    pdf.cell(0, 8, f"Saldo: R$ {saldo:,.2f}", ln=True)
+
+    pdf.ln(5)
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Gráficos", ln=True)
+
+    pdf.image(grafico1[0], x=25, w=160)
+    pdf.ln(5)
+    pdf.image(grafico2[0], x=15, w=180)
+
+    caminho_pdf = f"{RELATORIOS_DIR}/{usuario}_relatorio.pdf"
+    pdf.output(caminho_pdf)
+
+    return caminho_pdf
+
+
+# =========================
+# 8. CSV
+# =========================
+def gerar_csv(historico, usuario):
+    caminho = f"{RELATORIOS_DIR}/{usuario}_historico.csv"
+    historico.to_csv(caminho, index=False)
+    return caminho
+
+
+# =========================
+# 9. LOGIN
+# =========================
+st.title("📊 DEBITANDO – MENOS PLANILHA, MAIS RESULTADO")
+
+usuario = st.text_input("👤 Digite seu nome ou email")
+
+if not usuario:
+    st.info("Digite um identificador para acessar.")
+    st.stop()
+
+st.success(f"Bem-vindo(a), {usuario}!")
+
+
+# =========================
+# 10. SIDEBAR - RENDA
+# =========================
+st.sidebar.header("💰 Renda")
+
+salario_a = st.sidebar.number_input("Salário Pessoa A", min_value=0.0)
+salario_b = st.sidebar.number_input("Salário Pessoa B", min_value=0.0)
+renda_extra = st.sidebar.number_input("Renda Extra", min_value=0.0)
+
+renda_total = salario_a + salario_b + renda_extra
+
+
+# =========================
+# 11. OBJETIVO
+# =========================
+st.sidebar.header("🎯 Objetivo")
+
+objetivo_valor = st.sidebar.number_input("Valor do objetivo", min_value=0.0)
+percentual_objetivo = st.sidebar.slider("Percentual da renda (%)", 1, 50, 10)
+
+
+# =========================
+# 12. DESPESAS
+# =========================
+despesas_df = pd.DataFrame({
+    "Categoria": ["Moradia", "Alimentação", "Transporte", "Internet", "Lazer", "Outros"],
+    "Valor": [0, 0, 0, 0, 0, 0]
+})
+
+despesas = st.data_editor(despesas_df, num_rows="fixed")
+
+total_despesas = despesas["Valor"].sum()
+saldo = renda_total - total_despesas
+
+
+# =========================
+# 13. RESERVA DE EMERGÊNCIA
+# =========================
+st.sidebar.header("🚨 Reserva de Emergência")
+
+meses_seguranca = st.sidebar.slider("Meses de segurança", 1, 12, 6)
+reserva_atual = st.sidebar.number_input("Reserva atual (R$)", min_value=0.0)
+
+reserva_ideal = total_despesas * meses_seguranca
+falta_reserva = max(reserva_ideal - reserva_atual, 0)
+
+st.sidebar.metric("Reserva Ideal", f"R$ {reserva_ideal:,.2f}")
+st.sidebar.metric("Falta para a reserva", f"R$ {falta_reserva:,.2f}")
+
+
+# =========================
+# 14. ABAS
+# =========================
+aba1, aba2, aba3, aba4, aba5 = st.tabs([
+    "📌 Resumo",
+    "📊 Gráficos",
+    "🎯 Evolução",
+    "🕒 Histórico",
+    "🧮 Divisão das Despesas"
+])
+
+with aba1:
+    st.subheader("Resumo Financeiro")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Renda Total", f"R$ {renda_total:,.2f}")
+    col2.metric("Despesas", f"R$ {total_despesas:,.2f}")
+    col3.metric("Saldo", f"R$ {saldo:,.2f}")
+
+    if st.button("💾 Salvar este mês no histórico"):
+        salvar_evento(
+            usuario,
+            tipo="Cálculo",
+            descricao="Cálculo mensal",
+            valor=saldo,
+            saldo=saldo
+        )
+        st.success("Histórico salvo com sucesso!")
+
+
+with aba2:
+    st.subheader("📊 Gráfico de Despesas")
+
+    resultado = gerar_grafico_despesas(despesas, usuario)
+    if resultado:
+        st.pyplot(resultado[1])
+    else:
+        st.info("Preencha as despesas para visualizar o gráfico.")
+
+
+with aba3:
+    st.subheader("🎯 Evolução do Saldo")
+
+    historico = carregar_historico(usuario)
+    resultado = gerar_grafico_saldo(historico, usuario)
+
+    if resultado:
+        st.pyplot(resultado[1])
+    else:
+        st.info("Ainda não há histórico suficiente.")
+
+
+with aba4:
+    st.subheader("🕒 Histórico Financeiro")
+
+    historico = carregar_eventos(usuario)
+
+    filtro = st.selectbox(
+        "Filtrar por tipo",
+        ["Todos", "Renda", "Despesa", "Imprevisto", "Cálculo"]
+    )
+
+    if filtro != "Todos":
+        historico = historico[historico["Tipo"] == filtro]
+
+    st.dataframe(
+        historico.sort_values("Data", ascending=False),
+        use_container_width=True
+    )
+
+with aba5:
+    st.subheader("🧮 Divisão das Despesas")
+
+    st.markdown("Escolha como deseja dividir as despesas mensais:")
+
+    tipo_divisao = st.radio(
+        "Modelo de divisão",
+        ["50% para cada", "Proporcional ao salário"]
+    )
+
+    if tipo_divisao == "50% para cada":
+        valor = total_despesas / 2
+
+        st.metric("Pessoa A paga", f"R$ {valor:,.2f}")
+        st.metric("Pessoa B paga", f"R$ {valor:,.2f}")
+
+    else:
+        renda_total_dupla = salario_a + salario_b
+
+        if renda_total_dupla == 0:
+            st.warning("Informe os salários para cálculo proporcional.")
+        else:
+            percentual_a = salario_a / renda_total_dupla
+            percentual_b = salario_b / renda_total_dupla
+
+            valor_a = total_despesas * percentual_a
+            valor_b = total_despesas * percentual_b
+
+            st.metric(
+                "Pessoa A paga",
+                f"R$ {valor_a:,.2f}",
+                f"{percentual_a:.0%} da renda"
+            )
+
+            st.metric(
+                "Pessoa B paga",
+                f"R$ {valor_b:,.2f}",
+                f"{percentual_b:.0%} da renda"
+            )
+
+# =========================
+# RODAPÉ
+# =========================
+st.markdown("---")
+st.caption("DEBITANDO - MENOS PLANILHA, MAIS RESULTADO © – ZIP4 COMPUTERS.")
